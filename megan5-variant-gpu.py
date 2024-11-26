@@ -39,15 +39,17 @@ class StyleGANConfig:
     mapping_layers: int = 2
     style_dim: int = 64
     num_channels: int = 1
-    batch_size: int = 8    # Increased slightly
-    learning_rate: float = 0.0001
-    epochs: int = 100
+    batch_size: int = 8
+    initial_learning_rate: float = 0.0001
+    decay_steps: int = 1000
+    decay_rate: float = 0.95
+    epochs: int = 100  # Keep 100 epochs for robustness
     checkpoint_dir: str = './checkpoints'
     gradient_clip: float = 1.0
-    use_mixed_precision: bool = False  # Disabled mixed precision
-    num_variants: int = 4      # Number of variants per malware
-    style_mixing_prob: float = 0.9  # Probability of style mixing
-    diversity_weight: float = 0.1    # Weight for variant diversity loss
+    gradient_penalty_weight: float = 10.0
+    diversity_weight: float = 0.1
+    num_variants: int = 4
+    dropout_rate: float = 0.3
 
 # Remove mixed precision policy
 # tf.keras.mixed_precision.set_global_policy('mixed_float16')
@@ -217,20 +219,16 @@ class MalwareStyleGAN:
         x = img
         channels = [32, 64, 128, 256]
         
-        # Add residual connections
         for ch in channels:
-            residual = x
             x = tf.keras.layers.Conv2D(ch, 3, strides=2, padding='same')(x)
             x = tf.keras.layers.LeakyReLU(0.2)(x)
-            x = tf.keras.layers.BatchNormalization(momentum=0.8)(x)
-            if x.shape[1:3] == residual.shape[1:3]:
-                x = tf.keras.layers.Add()([x, residual])
-                
+            x = tf.keras.layers.Dropout(self.config.dropout_rate)(x)
+        
         x = tf.keras.layers.GlobalAveragePooling2D()(x)
         x = tf.keras.layers.Concatenate()([x, label])
         x = tf.keras.layers.Dense(256)(x)
         x = tf.keras.layers.LeakyReLU(0.2)(x)
-        # Change output to match number of variants
+        x = tf.keras.layers.Dropout(self.config.dropout_rate)(x)
         x = tf.keras.layers.Dense(self.config.num_variants)(x)
         
         return tf.keras.Model([img, label], x, name='discriminator')
@@ -265,6 +263,9 @@ class MalwareStyleGAN:
 
     @tf.function
     def train_step(self, real_images, labels):
+        # Clear memory
+        tf.keras.backend.clear_session()
+        
         batch_size = tf.shape(real_images)[0]
         
         with tf.GradientTape(persistent=True) as tape:
@@ -327,6 +328,18 @@ class MalwareStyleGAN:
             
             generator_loss = -variant_loss + self.config.diversity_weight * diversity_loss
             encoder_loss = tf.reduce_mean(tf.square(self.encoder(real_images) - w_base))
+            
+            # Add gradient penalty
+            gp = self.gradient_penalty(real_images, variants_stacked[0], labels)
+            
+            # Calculate losses
+            variant_loss = tf.reduce_mean(
+                tf.nn.softmax_cross_entropy_with_logits(
+                    labels=tf.cast(tf.eye(self.config.num_variants), tf.float32),
+                    logits=variant_logits
+                ))
+            
+            total_loss = variant_loss + self.config.gradient_penalty_weight * gp
         
         # Apply gradients with clipping
         gradients = [
@@ -341,6 +354,9 @@ class MalwareStyleGAN:
             if grads is not None:
                 clipped_grads, _ = tf.clip_by_global_norm(grads, self.config.gradient_clip)
                 optimizer.apply_gradients(zip(clipped_grads, vars))
+        
+        # Delete tape
+        del tape
         
         # Return losses with consistent keys
         return {
@@ -377,7 +393,7 @@ class MalwareStyleGAN:
 def main():
     # Configure GPU with simpler strategy
     physical_devices = tf.config.list_physical_devices('GPU')
-    if physical_devices:
+    if (physical_devices):
         print(f"GPU(s) detected: {len(physical_devices)}")
         # Configure memory growth
         for device in physical_devices:
@@ -412,13 +428,15 @@ def main():
     model = MalwareStyleGAN(config, len(class_indices))
 
     # Training loop
+    best_loss = float('inf')
+    patience_counter = 0
+    
     for epoch in range(config.epochs):
         print(f"Epoch {epoch+1}/{config.epochs}")
         
         epoch_losses = []
         for batch_idx, (images, labels) in enumerate(train_ds):
             try:
-                # Direct training step without distribution
                 losses = model.train_step(images, labels)
                 epoch_losses.append(losses)
                 
@@ -432,7 +450,51 @@ def main():
                 tf.keras.backend.clear_session()
                 continue
 
-        # Rest of the training loop remains same
+        # Calculate epoch averages
+        avg_losses = {k: float(np.mean([x[k] for x in epoch_losses])) 
+                     for k in epoch_losses[0].keys()}
+        print(f"Epoch {epoch+1} Averages:")
+        for k, v in avg_losses.items():
+            print(f"{k}: {v:.4f}")
+        
+        # Save checkpoint after each epoch
+        checkpoint_path = os.path.join(config.checkpoint_dir, f'epoch_{epoch+1}')
+        model.save_model(checkpoint_path, class_indices)
+        print(f"Saved checkpoint at {checkpoint_path}")
+        
+        # Generate samples every 10 epochs
+        if epoch % 10 == 0:
+            z = tf.random.normal((4, config.latent_dim))
+            labels = tf.one_hot(range(4), len(class_indices))
+            w = model.mapping_network([z, labels])
+            fake_images = model.generator(w)
+            
+            plt.figure(figsize=(10, 10))
+            for i in range(4):
+                plt.subplot(2, 2, i+1)
+                plt.imshow(fake_images[i] * 0.5 + 0.5, cmap='gray')
+                plt.axis('off')
+            plt.savefig(f'samples/epoch_{epoch+1}.png')
+            plt.close()
+        
+        # Check early stopping
+        current_loss = avg_losses['variant_loss']
+        if current_loss < best_loss:
+            best_loss = current_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= config.early_stopping_patience:
+            print("Early stopping triggered")
+            break
+
+# Add learning rate scheduling
+learning_rate = tf.keras.optimizers.schedules.ExponentialDecay(
+    initial_learning_rate=config.initial_learning_rate,
+    decay_steps=config.decay_steps,
+    decay_rate=config.decay_rate
+)
 
 if __name__ == "__main__":
     main()
