@@ -40,6 +40,7 @@ class StyleGANConfig:
     style_dim: int = 64
     num_channels: int = 1
     batch_size: int = 8
+    learning_rate: float = 0.0001  # Add this
     initial_learning_rate: float = 0.0001
     decay_steps: int = 1000
     decay_rate: float = 0.95
@@ -50,6 +51,7 @@ class StyleGANConfig:
     diversity_weight: float = 0.1
     num_variants: int = 4
     dropout_rate: float = 0.3
+    early_stopping_patience: int = 5
 
 # Remove mixed precision policy
 # tf.keras.mixed_precision.set_global_policy('mixed_float16')
@@ -128,11 +130,18 @@ class MalwareStyleGAN:
         self.encoder = self.build_encoder()
         self.discriminator = self.build_memory_efficient_discriminator()
         
-        # Create separate optimizers
-        self.d_optimizer = tf.keras.optimizers.Adam(config.learning_rate)
-        self.g_optimizer = tf.keras.optimizers.Adam(config.learning_rate)
-        self.m_optimizer = tf.keras.optimizers.Adam(config.learning_rate)
-        self.e_optimizer = tf.keras.optimizers.Adam(config.learning_rate)
+        # Create learning rate schedule
+        self.learning_rate = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=config.initial_learning_rate,
+            decay_steps=config.decay_steps,
+            decay_rate=config.decay_rate
+        )
+        
+        # Create optimizers with schedule
+        self.d_optimizer = tf.keras.optimizers.Adam(self.learning_rate)
+        self.g_optimizer = tf.keras.optimizers.Adam(self.learning_rate)
+        self.m_optimizer = tf.keras.optimizers.Adam(self.learning_rate)
+        self.e_optimizer = tf.keras.optimizers.Adam(self.learning_rate)
         
         # Initialize optimizers with their respective variables
         dummy_input = tf.zeros((1, config.latent_dim))
@@ -263,9 +272,6 @@ class MalwareStyleGAN:
 
     @tf.function
     def train_step(self, real_images, labels):
-        # Clear memory
-        tf.keras.backend.clear_session()
-        
         batch_size = tf.shape(real_images)[0]
         
         with tf.GradientTape(persistent=True) as tape:
@@ -276,7 +282,7 @@ class MalwareStyleGAN:
             # Generate base variant
             z_base = tf.random.normal((batch_size, self.config.latent_dim), 
                                     dtype=tf.float32,
-                                    stddev=1.0)  # Control variance
+                                    stddev=1.0)
             w_base = self.mapping_network([z_base, labels])
             
             # Generate variants with controlled noise
@@ -292,9 +298,9 @@ class MalwareStyleGAN:
             for _ in range(self.config.num_variants - 1):
                 z_new = tf.random.normal((batch_size, self.config.latent_dim), 
                                        dtype=tf.float32,
-                                       stddev=0.5)  # Reduced variance
+                                       stddev=0.5)
                 w_new = self.mapping_network([z_new, labels])
-                w_mixed = w_base * 0.7 + w_new * 0.3  # Adjusted mixing ratio
+                w_mixed = w_base * 0.7 + w_new * 0.3
                 variant = self.generator(w_mixed)
                 variants_list.append(variant)
                 w_variants_list.append(w_mixed)
@@ -303,45 +309,31 @@ class MalwareStyleGAN:
             variants_stacked = tf.stack(variants_list)
             variants_stacked = tf.clip_by_value(variants_stacked, -1.0, 1.0)
             
-            # Compute discriminator outputs
+            # Compute losses
             variant_logits = self.discriminator([
                 tf.reshape(variants_stacked, 
                           [-1, self.config.image_size, self.config.image_size, self.config.num_channels]),
                 tf.tile(labels, [self.config.num_variants, 1])
             ])
             
-            # Loss calculations with stable numerics
+            # Loss calculations
             variant_labels = tf.cast(tf.eye(self.config.num_variants), dtype=tf.float32)
             variant_labels = tf.tile(variant_labels, [batch_size, 1])
             
-            # Use stable cross entropy
             variant_loss = tf.reduce_mean(
                 tf.nn.softmax_cross_entropy_with_logits(
                     labels=variant_labels,
                     logits=variant_logits
                 ))
             
-            # Normalized diversity loss
             diversity_loss = -tf.reduce_mean(
                 tf.abs(variants_stacked[:, None] - variants_stacked[None, :])
-            ) * 0.1  # Scale factor
+            ) * 0.1
             
             generator_loss = -variant_loss + self.config.diversity_weight * diversity_loss
             encoder_loss = tf.reduce_mean(tf.square(self.encoder(real_images) - w_base))
-            
-            # Add gradient penalty
-            gp = self.gradient_penalty(real_images, variants_stacked[0], labels)
-            
-            # Calculate losses
-            variant_loss = tf.reduce_mean(
-                tf.nn.softmax_cross_entropy_with_logits(
-                    labels=tf.cast(tf.eye(self.config.num_variants), tf.float32),
-                    logits=variant_logits
-                ))
-            
-            total_loss = variant_loss + self.config.gradient_penalty_weight * gp
         
-        # Apply gradients with clipping
+        # Apply gradients
         gradients = [
             (variant_loss, self.discriminator.trainable_variables, self.d_optimizer),
             (generator_loss, self.generator.trainable_variables, self.g_optimizer),
@@ -355,10 +347,8 @@ class MalwareStyleGAN:
                 clipped_grads, _ = tf.clip_by_global_norm(grads, self.config.gradient_clip)
                 optimizer.apply_gradients(zip(clipped_grads, vars))
         
-        # Delete tape
         del tape
         
-        # Return losses with consistent keys
         return {
             'variant_loss': variant_loss,
             'generator_loss': generator_loss,
