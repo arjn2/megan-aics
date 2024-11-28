@@ -320,25 +320,33 @@ class MalwareStyleGAN:
                                           self.config.image_size,
                                           self.config.num_channels))
         label = tf.keras.layers.Input(shape=(self.num_classes,))
-
+        
+        # Stronger feature extraction
         x = img
-        channels = [32, 64, 128, 256]
-
-        # Add residual connections
+        channels = [64, 128, 256, 512]  # Increased channels
+        
         for ch in channels:
-            residual = x
-            x = tf.keras.layers.Conv2D(ch, 3, strides=2, padding='same')(x)
+            x = tf.keras.layers.Conv2D(ch, 4, strides=2, padding='same')(x)
+            x = tf.keras.layers.LeakyReLU(0.2)(x)
+            x = tf.keras.layers.Dropout(0.3)(x)  # Add dropout
+            
+            # Spectral normalization for stability
+            x = tf.keras.layers.Conv2D(ch*2, 4, strides=1, padding='same',
+                kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
             x = tf.keras.layers.LeakyReLU(0.2)(x)
             x = tf.keras.layers.BatchNormalization(momentum=0.8)(x)
-            if x.shape[1:3] == residual.shape[1:3]:
-                x = tf.keras.layers.Add()([x, residual])
-
+        
         x = tf.keras.layers.GlobalAveragePooling2D()(x)
         x = tf.keras.layers.Concatenate()([x, label])
+        
+        # Deeper classification head
+        x = tf.keras.layers.Dense(512)(x)
+        x = tf.keras.layers.LeakyReLU(0.2)(x)
+        x = tf.keras.layers.Dropout(0.3)(x)
         x = tf.keras.layers.Dense(256)(x)
         x = tf.keras.layers.LeakyReLU(0.2)(x)
-        x = tf.keras.layers.Dense(self.config.num_variants, activation='sigmoid')(x)
-
+        x = tf.keras.layers.Dense(self.config.num_variants)(x)
+        
         return tf.keras.Model([img, label], x, name='discriminator')
 
     def generate_variants(self, z, labels, num_variants):
@@ -372,47 +380,52 @@ class MalwareStyleGAN:
     @tf.function
     def train_step(self, real_images, labels):
         batch_size = tf.shape(real_images)[0]
-
+        
         with tf.GradientTape(persistent=True) as tape:
+            # Generate variants with more diversity
             z_base = tf.random.normal((batch_size, self.config.latent_dim))
             w_base = self.mapping_network([z_base, labels])
-
+            
             variants_list = []
-            for _ in range(self.config.num_variants):
+            for i in range(self.config.num_variants):
                 z_new = tf.random.normal((batch_size, self.config.latent_dim))
                 w_new = self.mapping_network([z_new, labels])
-                w_mixed = w_base * 0.7 + w_new * 0.3
+                # Progressive mixing ratio
+                alpha = 0.5 + (i / self.config.num_variants) * 0.3
+                w_mixed = w_base * alpha + w_new * (1.0 - alpha)
                 variant = self.generator(w_mixed)
                 variants_list.append(variant)
-
+            
             variants_stacked = tf.stack(variants_list)
-
+            
+            # Compute discriminator outputs
             variant_logits = self.discriminator([
-                tf.reshape(variants_stacked,
-                          [-1, self.config.image_size, self.config.image_size,
+                tf.reshape(variants_stacked, 
+                          [-1, self.config.image_size, self.config.image_size, 
                            self.config.num_channels]),
                 tf.tile(labels, [self.config.num_variants, 1])
             ])
-
+            
+            # Wasserstein loss with gradient penalty
+            gradient_penalty = self._gradient_penalty(real_images, variants_stacked[0])
+            
             variant_labels = tf.cast(tf.eye(self.config.num_variants), dtype=tf.float32)
             variant_labels = tf.tile(variant_labels, [batch_size, 1])
-
-            variant_loss = tf.clip_by_value(
-                tf.reduce_mean(
-                    tf.nn.sigmoid_cross_entropy_with_logits(
-                        labels=variant_labels,
-                        logits=variant_logits
-                    )
-                ), -1.0, 1.0)
-
-            diversity_loss = tf.clip_by_value(
-                -tf.reduce_mean(
-                    tf.abs(variants_stacked[:, None] - variants_stacked[None, :])
-                ) * 0.1, -1.0, 1.0)
-
-            generator_loss = tf.clip_by_value(-variant_loss + 
-                                            self.config.diversity_weight * diversity_loss,
-                                            -1.0, 1.0)
+            
+            # Modified loss calculation
+            variant_loss = tf.reduce_mean(
+                tf.keras.losses.categorical_crossentropy(
+                    variant_labels, 
+                    variant_logits,
+                    from_logits=True
+                )
+            ) + 10.0 * gradient_penalty
+            
+            diversity_loss = -tf.reduce_mean(
+                tf.abs(variants_stacked[:, None] - variants_stacked[None, :])
+            ) * self.config.diversity_weight
+            
+            generator_loss = -variant_loss + diversity_loss
 
         # Update gradients without encoder
         gradients = [
@@ -515,6 +528,24 @@ class MalwareStyleGAN:
             'confusion_matrix': conf_matrix.tolist(),
             'classification_report': report
         }
+
+    def _gradient_penalty(self, real_images, generated_images):
+        """Compute gradient penalty for WGAN-GP"""
+        batch_size = tf.shape(real_images)[0]
+        alpha = tf.random.uniform([batch_size, 1, 1, 1], 0.0, 1.0)
+        diff = generated_images - real_images
+        interpolated = real_images + alpha * diff
+
+        with tf.GradientTape() as gp_tape:
+            gp_tape.watch(interpolated)
+            # Get discriminator output
+            pred = self.discriminator([interpolated, tf.zeros((batch_size, self.num_classes))])
+
+        grads = gp_tape.gradient(pred, interpolated)
+        norm = tf.sqrt(tf.reduce_sum(tf.square(grads), axis=[1, 2, 3]))
+        gp = tf.reduce_mean((norm - 1.0) ** 2)
+        
+        return gp
 
 def main():
     # Configure GPU with simpler strategy
