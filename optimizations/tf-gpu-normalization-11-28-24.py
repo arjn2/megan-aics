@@ -12,6 +12,8 @@ from typing import Dict , Tuple
 import logging
 import absl.logging
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
 
 # Initialize ABSL logging
 absl.logging.set_verbosity(absl.logging.ERROR)
@@ -444,6 +446,68 @@ class MalwareStyleGAN:
         self.discriminator = tf.keras.models.load_model(
             os.path.join(path, 'discriminator.keras'))
 
+    def evaluate_model(self, val_ds, epoch):
+        """Evaluate model with improved metrics handling"""
+        if (epoch + 1) % 20 != 0:
+            return
+            
+        predictions = []
+        true_labels = []
+        
+        # Collect predictions
+        for images, labels in val_ds:
+            z = tf.random.normal((tf.shape(images)[0], self.config.latent_dim))
+            w = self.mapping_network([z, labels])
+            fake_images = self.generator(w)
+            
+            pred = self.discriminator([fake_images, labels])
+            predictions.append(tf.argmax(pred, axis=1))
+            true_labels.append(tf.argmax(labels, axis=1))
+        
+        # Convert to numpy arrays
+        predictions = tf.concat(predictions, axis=0).numpy()
+        true_labels = tf.concat(true_labels, axis=0).numpy()
+        
+        # Calculate metrics with zero division handling
+        conf_matrix = confusion_matrix(true_labels, predictions)
+        accuracy = tf.reduce_mean(tf.cast(tf.equal(predictions, true_labels), tf.float32))
+        
+        report = classification_report(
+            true_labels, 
+            predictions,
+            zero_division=1,  # Handle zero division
+            digits=4  # Increase precision
+        )
+        
+        # Log metrics
+        print(f"\nEvaluation Metrics at Epoch {epoch + 1}:")
+        print(f"Accuracy: {accuracy:.4f}")
+        print("\nClassification Report:")
+        print(report)
+        
+        # Plot confusion matrix
+        plt.figure(figsize=(12, 10))
+        sns.heatmap(
+            conf_matrix, 
+            annot=True, 
+            fmt='d',
+            cmap='Blues',
+            xticklabels=range(self.config.num_variants),
+            yticklabels=range(self.config.num_variants)
+        )
+        plt.title(f'Confusion Matrix - Epoch {epoch + 1}')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.tight_layout()
+        plt.savefig(f'metrics/confusion_matrix_epoch_{epoch + 1}.png', dpi=300)
+        plt.close()
+        
+        return {
+            'accuracy': float(accuracy),
+            'confusion_matrix': conf_matrix.tolist(),
+            'classification_report': report
+        }
+
 def main():
     # Configure GPU with simpler strategy
     physical_devices = tf.config.list_physical_devices('GPU')
@@ -462,6 +526,7 @@ def main():
     # Create directories
     os.makedirs(config.checkpoint_dir, exist_ok=True)
     os.makedirs('samples', exist_ok=True)
+    os.makedirs('metrics', exist_ok=True)
 
     # Load datasets without distribution
     train_ds, class_names = preprocess_dataset(train_path,
@@ -541,6 +606,19 @@ def main():
         if patience_counter >= config.early_stopping_patience:
             print("Early stopping triggered")
             break
+
+        # Evaluate every 5 epochs
+        model.evaluate_model(val_ds, epoch)
+
+        # Save metrics
+        metrics = {
+            'epoch': epoch + 1,
+            'losses': avg_losses,
+            'accuracy': float(accuracy) if 'accuracy' in locals() else None
+        }
+        
+        with open(os.path.join('metrics', f'metrics_epoch_{epoch+1}.json'), 'w') as f:
+            json.dump(metrics, f, indent=2)
 
 if __name__ == "__main__":
     main()
