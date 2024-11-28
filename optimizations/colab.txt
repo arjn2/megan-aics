@@ -1,0 +1,9 @@
+# Mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Create directory if it doesn't exist
+!mkdir -p /content/sample_data/dataset
+
+# Unzip the contents
+!unzip '/content/drive/MyDrive/aicsproject/dataset.zip' -d '/content/sample_data/dataset/'
