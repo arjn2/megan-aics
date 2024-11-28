@@ -52,7 +52,7 @@ class StyleGANConfig:
     gradient_penalty_weight: float = 10.0
     diversity_weight: float = 0.1
     num_variants: int = 4
-    dropout_rate: float = 0.3
+    dropout_rate: float = 0.3  #randomly disables neuron during training 0.3 is default alternative is L2
     early_stopping_patience: int = 5
 
 config = StyleGANConfig()
