@@ -49,7 +49,7 @@ class StyleGANConfig:
     gradient_penalty_weight: float = 10.0
     diversity_weight: float = 0.1
     num_variants: int = 4
-    dropout_rate: float = 0
+    dropout_rate: float = 0.3
     early_stopping_patience: int = 5
 
 config = StyleGANConfig()
@@ -496,11 +496,23 @@ def main():
     synthetic_images = tf.concat(synthetic_images, axis=0)
     synthetic_labels = tf.concat(synthetic_labels, axis=0)
 
-    # Combine real and synthetic data
-    combined_images = tf.concat([train_ds.unbatch().batch(config.batch_size).map(lambda x, y: x), synthetic_images], axis=0)
-    combined_labels = tf.concat([train_ds.unbatch().batch(config.batch_size).map(lambda x, y: y), synthetic_labels], axis=0)
+    # Modify the data combination section
+    # Instead of using map directly, first convert to numpy arrays
+    real_images = []
+    real_labels = []
+    for images, labels in train_ds:
+        real_images.append(images)
+        real_labels.append(labels)
+    real_images = tf.concat(real_images, axis=0)
+    real_labels = tf.concat(real_labels, axis=0)
 
-    combined_ds = tf.data.Dataset.from_tensor_slices((combined_images, combined_labels)).batch(config.batch_size).prefetch(tf.data.AUTOTUNE)
+    # Now combine with synthetic data
+    combined_images = tf.concat([real_images, synthetic_images], axis=0)
+    combined_labels = tf.concat([real_labels, synthetic_labels], axis=0)
+
+    # Create the combined dataset
+    combined_ds = tf.data.Dataset.from_tensor_slices((combined_images, combined_labels))
+    combined_ds = combined_ds.batch(config.batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Train the malware detection model with real + synthetic data
     combined_model = build_malware_detection_model((config.image_size, config.image_size, config.num_channels), len(class_indices))
