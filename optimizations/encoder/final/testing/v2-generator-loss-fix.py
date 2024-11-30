@@ -43,7 +43,7 @@ class StyleGANConfig:
     initial_learning_rate: float = 0.0001
     decay_steps: int = 1000
     decay_rate: float = 0.95
-    epochs: int = 1  # Fixed to 15 epochs
+    epochs: int = 15  # Fixed to 15 epochs
     checkpoint_dir: str = './checkpoints'
     gradient_clip: float = 1.0
     gradient_penalty_weight: float = 10.0
@@ -168,24 +168,29 @@ class MalwareStyleGAN:
 
     def build_memory_efficient_generator(self):
         style = tf.keras.layers.Input(shape=(self.config.style_dim,))
+
+        # Initial dense layer
         x = tf.keras.layers.Dense(8 * 8 * 256)(style)
-        # Add wave interference after initial dense layer
-        x = tf.keras.layers.Lambda(
-            lambda x: wave_interference_layer(x, self.wave_freq, self.wave_phase)
-        )(x)
+
+        # Wave interference in feature space
+        def wave_modulation(x):
+            amplitude = tf.exp(-tf.square(x) / (2 * 0.1**2))
+            phase = tf.sin(self.wave_freq * x + self.wave_phase)
+            return x * amplitude * phase
+
+        x = tf.keras.layers.Lambda(wave_modulation)(x)
         x = tf.keras.layers.Reshape((8, 8, 256))(x)
 
         channels = [256, 128, 64, 32]
         for ch in channels:
             x = tf.keras.layers.UpSampling2D()(x)
-            x = tf.keras.layers.Conv2D(ch, 3, padding='same',
-                                     kernel_initializer='he_normal')(x)
+            x = tf.keras.layers.Conv2D(ch, 3, padding='same')(x)
+            # Apply wave interference to feature maps
+            x = tf.keras.layers.Lambda(wave_modulation)(x)
             x = tf.keras.layers.LeakyReLU(0.2)(x)
             x = tf.keras.layers.BatchNormalization(momentum=0.8)(x)
 
-        x = tf.keras.layers.Conv2D(self.config.num_channels, 1,
-                                  activation='tanh')(x)
-
+        x = tf.keras.layers.Conv2D(self.config.num_channels, 1, activation='tanh')(x)
         return tf.keras.Model(style, x, name='generator')
 
     def build_encoder(self):
@@ -304,10 +309,6 @@ class MalwareStyleGAN:
 
             generator_loss = -variant_loss + self.config.diversity_weight * diversity_loss
 
-            # Modify generator loss with wave modulation
-            wave_term = tf.sin(self.wave_freq * tf.reduce_mean(generator_loss))
-            generator_loss *= tf.abs(wave_term)
-
             encoder_loss = tf.reduce_mean(tf.square(self.encoder(real_images) - w_base))
 
         gradients = [
@@ -319,7 +320,10 @@ class MalwareStyleGAN:
         for loss, vars, optimizer in gradients:
             grads = tape.gradient(loss, vars)
             if grads is not None:
-                clipped_grads = tf.clip_by_global_norm(grads, self.config.gradient_clip)[0]
+                # Modulate gradients with wave interference
+                wave_grads = [g * tf.abs(tf.sin(self.wave_freq * tf.reduce_mean(g) + self.wave_phase))
+                            for g in grads]
+                clipped_grads = tf.clip_by_global_norm(wave_grads, self.config.gradient_clip)[0]
                 optimizer.apply_gradients(zip(clipped_grads, vars))
 
         del tape
