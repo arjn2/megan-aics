@@ -225,8 +225,8 @@ class MalwareStyleGAN:
                 z_new = tf.random.normal((tf.shape(z)))
                 w_new = self.mapping_network([z_new, labels])
 
-                mixing_ratio = tf.random.uniform([], 0.3, 0.7)
-                w_mixed = w_base * mixing_ratio + w_new * (1 - mixing_ratio)
+                mixing_weights = tf.random.uniform([tf.shape(w_base)[1]], 0, 1)
+                w_mixed = w_base * mixing_weights + w_new * (1 - mixing_weights)
                 latent_codes.append(w_mixed)
             else:
                 w_perturbed = w_base + tf.random.normal(tf.shape(w_base)) * 0.1
@@ -262,8 +262,7 @@ class MalwareStyleGAN:
                                        dtype=tf.float32,
                                        stddev=0.5)
                 w_new = self.mapping_network([z_new, labels])
-                mixing_ratio = tf.random.uniform([], 0.3, 0.7)
-                w_mixed = w_base * mixing_ratio + w_new * (1 - mixing_ratio)
+                w_mixed = w_base * 0.7 + w_new * 0.3
                 variant = self.generator(w_mixed)
                 variants_list.append(variant)
                 w_variants_list.append(w_mixed)
@@ -286,19 +285,11 @@ class MalwareStyleGAN:
                     logits=variant_logits
                 ))
 
-            diversity_weight = tf.Variable(0.1, trainable=False)
             diversity_loss = -tf.reduce_mean(
                 tf.abs(variants_stacked[:, None] - variants_stacked[None, :])
-            ) * diversity_weight
+            ) * 0.1
 
-            variant_loss = variant_loss * tf.math.reduce_mean(tf.abs(variants_stacked))
-            generator_loss = -variant_loss + diversity_weight * diversity_loss
-
-            gradient_penalty = self.config.gradient_penalty_weight * tf.reduce_mean(
-                tf.square(tf.norm(tape.gradient(variant_logits, variants_stacked), axis=1) - 1)
-            )
-            generator_loss += gradient_penalty
-
+            generator_loss = -variant_loss + self.config.diversity_weight * diversity_loss
             encoder_loss = tf.reduce_mean(tf.square(self.encoder(real_images) - w_base))
 
         gradients = [
@@ -319,8 +310,7 @@ class MalwareStyleGAN:
             'variant_loss': variant_loss,
             'generator_loss': generator_loss,
             'encoder_loss': encoder_loss,
-            'diversity_loss': diversity_loss,
-            'gradient_penalty': gradient_penalty
+            'diversity_loss': diversity_loss
         }
 
     def save_model(self, path: str, class_indices: Dict):
@@ -437,9 +427,7 @@ def main():
                 if batch_idx % 10 == 0:
                     print(f"Batch {batch_idx}: variant_loss={losses['variant_loss']:.4f}, "
                           f"generator_loss={losses['generator_loss']:.4f}, "
-                          f"encoder_loss={losses['encoder_loss']:.4f}, "
-                          f"diversity_loss={losses['diversity_loss']:.4f}, "
-                          f"gradient_penalty={losses['gradient_penalty']:.4f}")
+                          f"encoder_loss={losses['encoder_loss']:.4f}")
 
             except tf.errors.ResourceExhaustedError:
                 print("GPU memory exhausted, skipping batch")
