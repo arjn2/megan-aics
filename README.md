@@ -4,6 +4,22 @@ Enhanced Style-GAN based training model which extends dataset by generating new 
 
 Combined encoders with styleGAN for quality generation for new images.
 
+# Dataset used
+
+Malevis balanced dataset from kaggle is modified with new class of additionlayy added bening pe images.
+
+dataset/pe2img.py is the python script used to convert pe files to gray images.
+
+
+# Optimizations
+
+Well optimized for both gpu and cpu ,can run easily on google colab and local system also.
+
+Strict paramters for memory efficiency, Avoid overfitting using early stopping patience, batch file optimizations ,etc.
+
+improved training speed on GPU.
+
+run well with 7-8 gb vram lock.
 
 # Improvement using CONFUSION MATRIX
 
