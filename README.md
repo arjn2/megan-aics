@@ -1,6 +1,8 @@
 # megan-aics
 
-Enhanced Style-GAN based training model which generates new variants of dataset. 
+Enhanced Style-GAN based training model which extends dataset by generating new variants without compromising quality of generation.
+
+Use of encoders to enable quality generation for dataset extension. 
 
 # Improvement
 GAN MODEL CONFUSION MATRIX
