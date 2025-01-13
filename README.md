@@ -2,7 +2,7 @@
 
 Enhanced Style-GAN based training model which extends dataset by generating new variants without compromising quality of generation.
 
-Use of encoders to enable quality generation for dataset extension. 
+Combined encoders with styleGAN for quality generation for dataset extension. 
 
 # Improvement
 GAN MODEL CONFUSION MATRIX
