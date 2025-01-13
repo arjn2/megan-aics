@@ -6,7 +6,9 @@ Combined encoders with styleGAN for quality generation for new images.
 
 # Dataset used
 
-Malevis balanced dataset from kaggle is modified with new class of additionlayy added bening pe images.
+Malevis balanced dataset from kaggle is modified with new class of additionally added benign pe images.
+
+This custom benign class will reduce false positives.
 
 dataset/pe2img.py is the python script used to convert pe files to gray images.
 
