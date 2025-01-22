@@ -33,3 +33,8 @@ Mixed (Real+generated data) MODEL
 MODEL trained only in Real dataset 
 ![NON-GAN](https://github.com/arjn2/megan-aics/blob/main/conf-matrix/non-gan.png?raw=true)
 
+# References
+```
+https://github.com/arjn2/MalDICT-reference
+Dikedataset benign github
+```
